@@ -2,14 +2,16 @@
 
 Real-time speech transcription using OpenAI's Whisper model with a modern web interface.
 
+**Built with:** OpenAI Whisper • PyTorch • Gradio • NumPy • SoundDevice
+
 ## Features
 
 - 🎤 Real-time audio transcription from your microphone
 - 🖥️ Clean, modern web interface
-- 📝 Full transcription history with timestamps
-- 💾 Save transcriptions to text files
+- 📝 Live preview of speech as you talk
+- 💾 Accurate final transcription when you stop recording
 - 🚀 Uses Apple Silicon (MPS) acceleration when available
-- ⚡ Low-latency processing with overlapping chunks
+- ⚡ Low-latency live display with complete audio transcription on stop
 
 ## Installation
 
@@ -35,12 +37,15 @@ python live_transcribe_gui.py
 
 Then open your browser to `http://127.0.0.1:7860`
 
+Press `Ctrl+C` in the terminal to stop the server cleanly.
+
 **Features:**
 - Start/Stop recording with a button
-- See live transcription as you speak
-- View complete transcription history with timestamps
+- See live transcription preview as you speak
+- Get accurate complete transcription when you stop recording
 - Save transcriptions to file
 - Download transcriptions directly from the browser
+- Clean transcriptions without hallucinations or repeated phrases
 
 ### Command Line Interface
 
@@ -54,11 +59,20 @@ Press `Ctrl+C` to stop.
 
 ## How It Works
 
+The application uses a two-stage transcription approach for optimal accuracy:
+
+### Live Preview (While Recording)
 1. **Audio Capture**: Records audio from your microphone in real-time
-2. **Buffering**: Maintains a rolling buffer of recent audio
-3. **Chunking**: Processes audio in 2-second chunks with 0.5s overlap for accuracy
-4. **Transcription**: Uses Whisper model to transcribe each chunk
-5. **Display**: Shows results in real-time
+2. **Buffering**: Maintains a rolling buffer of recent audio (5 seconds)
+3. **Chunking**: Processes audio in 2-second chunks with 0.5s overlap
+4. **Live Display**: Shows real-time transcription preview as you speak
+
+### Final Transcription (On Stop)
+1. **Complete Audio Buffer**: All recorded audio is stored throughout the session
+2. **Single-Pass Transcription**: When you stop, the entire recording is transcribed at once
+3. **Accurate Results**: Full context produces clean transcription without hallucinations or repeated phrases
+
+This approach gives you the best of both worlds: immediate feedback while recording and highly accurate final results.
 
 ## Configuration
 
@@ -82,12 +96,21 @@ You can adjust these parameters in the script:
 - Check microphone permissions in System Preferences
 - Verify your microphone is working with other apps
 
+**Final transcription takes time:**
+- The final transcription processes the entire recording for accuracy
+- Longer recordings will take a few seconds to process
+- This is normal and ensures you get clean, accurate results
+
 **Slow transcription:**
 - Try using a smaller model (`tiny` or `small`)
-- Reduce `CHUNK_DURATION` for faster (but potentially less accurate) results
+- Reduce `CHUNK_DURATION` for faster (but potentially less accurate) live preview
 
 **Port already in use (GUI):**
 - Change the `server_port` parameter in `live_transcribe_gui.py`
+
+**Program won't stop with Ctrl+C:**
+- The cleanup should now work properly
+- If it still hangs, use `Ctrl+Z` then `kill %1` as a last resort
 
 ## License
 

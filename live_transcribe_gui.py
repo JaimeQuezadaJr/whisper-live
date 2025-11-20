@@ -25,11 +25,10 @@ model = whisper.load_model("base", device=device)
 SAMPLE_RATE = 16000
 CHUNK_DURATION = 2.0  # seconds per chunk
 OVERLAP = 0.5  # overlap between chunks (in seconds)
-BUFFER_DURATION = 5.0  # how much past audio to keep
+BUFFER_DURATION = 5.0  # how much past audio to keep for preview
 
 audio_queue = queue.Queue()
 running = False
-full_transcription = []
 current_text = ""
 record_thread = None
 process_thread = None
@@ -44,69 +43,116 @@ def record_audio():
 
     def callback(indata, frames, time_info, status):
         if status:
-            print(status)
-        audio_queue.put(indata.copy())
+            print(f"⚠️ Audio status: {status}")
+        try:
+            if running:
+                audio_queue.put(indata.copy())
+        except Exception as e:
+            print(f"❌ Error in audio callback: {e}")
 
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE, channels=1, callback=callback, dtype="float32"
-    ):
-        print("\n🎙️ Listening...")
-        while running:
-            sd.sleep(100)
+    try:
+        with sd.InputStream(
+            samplerate=SAMPLE_RATE, channels=1, callback=callback, dtype="float32"
+        ):
+            print("\n🎙️ Listening...")
+            while running:
+                sd.sleep(100)
+    except Exception as e:
+        print(f"❌ Error in record_audio: {e}")
+    finally:
+        print("🔄 Recording thread stopped")
 
 
 # -------------------------------
 # AUDIO PROCESSING
 # -------------------------------
 def process_audio():
+    """Process audio chunks for live preview and store for final transcription."""
     global current_text, complete_audio_buffer
     buffer = np.zeros(int(BUFFER_DURATION * SAMPLE_RATE), dtype=np.float32)
     step_size = int(CHUNK_DURATION * SAMPLE_RATE)
     overlap_size = int(OVERLAP * SAMPLE_RATE)
 
     last_transcribed = 0
+    chunks_processed = 0
+
+    print("🔄 Audio processing thread started")
 
     while running:
         try:
             new_data = audio_queue.get(timeout=1)
-            new_len = len(new_data)
 
-            # Store all audio for final transcription
+            if new_data is None or len(new_data) == 0:
+                continue
+
+            new_len = len(new_data)
+            chunks_processed += 1
+
+            # Store all audio for final transcription when stopped
             complete_audio_buffer.append(new_data.copy())
 
+            # Update rolling buffer for live preview
             buffer = np.roll(buffer, -new_len)
             buffer[-new_len:] = new_data.flatten()
 
             last_transcribed += new_len
+
+            # Live preview transcription every ~2 seconds
             if last_transcribed >= step_size - overlap_size:
                 last_transcribed = 0
-                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                    filename = tmp.name
-                    with wave.open(filename, "wb") as wf:
-                        wf.setnchannels(1)
-                        wf.setsampwidth(2)
-                        wf.setframerate(SAMPLE_RATE)
-                        wf.writeframes((buffer * 32767).astype(np.int16).tobytes())
+                filename = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        suffix=".wav", delete=False
+                    ) as tmp:
+                        filename = tmp.name
+                        with wave.open(filename, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(SAMPLE_RATE)
+                            wf.writeframes((buffer * 32767).astype(np.int16).tobytes())
 
-                # Transcribe ONLY for live display (not saved to full transcription)
-                result = model.transcribe(
-                    filename,
-                    fp16=False,
-                    language="en",
-                    condition_on_previous_text=False,  # Prevent hallucinations
-                    temperature=0.0,  # More deterministic output
-                    no_speech_threshold=0.6,  # Higher threshold to filter out silence
-                )
-                text = result["text"].strip()
+                    # Quick transcription for live preview only
+                    result = model.transcribe(
+                        filename,
+                        fp16=False,
+                        language="en",
+                        condition_on_previous_text=False,
+                        temperature=0.0,
+                        no_speech_threshold=0.6,
+                    )
+                    text = result["text"].strip()
 
-                # Update live display only
-                if text and len(text) > 3:
-                    current_text = text
+                    # Update live preview
+                    if text and len(text) > 3:
+                        current_text = text
 
-                os.remove(filename)
+                    if chunks_processed % 50 == 0:
+                        print(
+                            f"📊 Processed {chunks_processed} chunks, buffer: {len(complete_audio_buffer)}"
+                        )
+
+                except Exception as e:
+                    print(f"⚠️ Error in preview transcription: {e}")
+                finally:
+                    if filename and os.path.exists(filename):
+                        try:
+                            os.remove(filename)
+                        except:
+                            pass
 
         except queue.Empty:
+            # Normal during silence - just continue
             continue
+        except Exception as e:
+            print(f"❌ Critical error in process_audio: {e}")
+            import traceback
+
+            traceback.print_exc()
+            # Don't exit - keep running
+            continue
+
+    print(f"🔄 Audio processing thread stopped (processed {chunks_processed} chunks)")
 
 
 # -------------------------------
@@ -114,9 +160,10 @@ def process_audio():
 # -------------------------------
 def start_recording():
     """Start the recording and transcription process."""
-    global running, record_thread, process_thread, full_transcription, current_text, complete_audio_buffer
+    global running, record_thread, process_thread, current_text, complete_audio_buffer
 
     if running:
+        print("⚠️ Already recording!")
         return (
             "⚠️ Already recording!",
             "",
@@ -125,15 +172,20 @@ def start_recording():
             gr.update(interactive=False),
         )
 
+    print("🎬 Starting new recording session...")
+
     # Reset state
-    full_transcription = []
     current_text = ""
     complete_audio_buffer = []
-    running = True
 
     # Clear the queue
     while not audio_queue.empty():
-        audio_queue.get()
+        try:
+            audio_queue.get_nowait()
+        except:
+            break
+
+    running = True
 
     # Start threads
     record_thread = threading.Thread(target=record_audio, daemon=True)
@@ -141,6 +193,8 @@ def start_recording():
 
     record_thread.start()
     process_thread.start()
+
+    print("✅ Recording threads started")
 
     return (
         "🎙️ Recording... Speak into your microphone",
@@ -164,52 +218,75 @@ def stop_recording():
             gr.update(interactive=True),
         )
 
+    print("⏸️ Stopping recording...")
     running = False
 
-    # Give threads time to see the flag
-    time.sleep(0.3)
+    # Give threads time to finish
+    time.sleep(0.5)
 
     # Wait for threads to finish
     if record_thread and record_thread.is_alive():
-        record_thread.join(timeout=2)
+        print("⏳ Waiting for record thread...")
+        record_thread.join(timeout=3)
     if process_thread and process_thread.is_alive():
-        process_thread.join(timeout=2)
+        print("⏳ Waiting for process thread...")
+        process_thread.join(timeout=3)
 
-    # Now transcribe the COMPLETE audio buffer for accurate final transcription
-    if complete_audio_buffer:
-        print("🔄 Generating final accurate transcription...")
+    # Now transcribe the complete recording for final accurate transcription
+    final_text = ""
+    if complete_audio_buffer and len(complete_audio_buffer) > 0:
+        try:
+            print(
+                f"🔄 Generating final transcription from {len(complete_audio_buffer)} chunks..."
+            )
 
-        # Concatenate all audio chunks
-        full_audio = np.concatenate(complete_audio_buffer)
+            # Concatenate all audio chunks
+            full_audio = np.concatenate(complete_audio_buffer)
 
-        # Save to temporary file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            filename = tmp.name
-            with wave.open(filename, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(SAMPLE_RATE)
-                wf.writeframes(
-                    (full_audio.flatten() * 32767).astype(np.int16).tobytes()
+            if len(full_audio) > SAMPLE_RATE * 0.3:  # At least 0.3 seconds
+                # Save to temporary file
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                    filename = tmp.name
+                    with wave.open(filename, "wb") as wf:
+                        wf.setnchannels(1)
+                        wf.setsampwidth(2)
+                        wf.setframerate(SAMPLE_RATE)
+                        wf.writeframes(
+                            (full_audio.flatten() * 32767).astype(np.int16).tobytes()
+                        )
+
+                # Transcribe entire recording with full context
+                result = model.transcribe(
+                    filename,
+                    fp16=False,
+                    language="en",
+                    condition_on_previous_text=False,
+                    temperature=0.0,
+                    no_speech_threshold=0.6,
                 )
 
-        # Transcribe the entire recording at once
-        result = model.transcribe(
-            filename,
-            fp16=False,
-            language="en",
-            condition_on_previous_text=False,
-            temperature=0.0,
-            no_speech_threshold=0.6,
-        )
+                final_text = result["text"].strip()
+                print(f"✅ Final transcription: {len(final_text)} characters")
 
-        final_text = result["text"].strip()
-        os.remove(filename)
+                try:
+                    os.remove(filename)
+                except:
+                    pass
 
-        if not final_text:
-            final_text = "No speech detected in recording."
+                if not final_text:
+                    final_text = "No speech detected in recording."
+            else:
+                final_text = "Recording too short."
+        except Exception as e:
+            print(f"⚠️ Error generating final transcription: {e}")
+            import traceback
+
+            traceback.print_exc()
+            final_text = "Error processing recording."
     else:
         final_text = "No audio recorded."
+
+    print("✅ Recording stopped")
 
     return (
         "✅ Recording stopped. Final transcription ready!",
@@ -222,12 +299,11 @@ def stop_recording():
 
 def clear_transcription():
     """Clear the current transcription."""
-    global full_transcription, current_text, running, complete_audio_buffer
+    global current_text, running, complete_audio_buffer
 
     if running:
         return "⚠️ Stop recording before clearing!", gr.update(), gr.update()
 
-    full_transcription = []
     current_text = ""
     complete_audio_buffer = []
 
@@ -266,7 +342,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Live Transcription") as demo:
     gr.Markdown(
         """
         # 🎙️ Live Transcription with Whisper
-        Start recording to see real-time transcription. Stop to get the full text and save it.
+        Start recording to see real-time transcription preview. Stop recording to get your complete, accurate transcription.
+        **Live Preview** shows what you're saying now • **Full Transcription** appears when you stop
         """
     )
 
@@ -281,10 +358,10 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Live Transcription") as demo:
 
     with gr.Row():
         with gr.Column():
-            gr.Markdown("### 🔴 Live Transcription")
+            gr.Markdown("### 🔴 Live Preview")
             live_text = gr.Textbox(
                 label="Current Speech",
-                placeholder="Start recording to see live transcription...",
+                placeholder="Start recording to see live transcription preview...",
                 lines=6,
                 max_lines=10,
                 interactive=False,
@@ -295,7 +372,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Live Transcription") as demo:
             gr.Markdown("### 📝 Full Transcription")
             full_text = gr.Textbox(
                 label="Complete Recording",
-                placeholder="Stop recording to see full transcription...",
+                placeholder="Stop recording to see complete transcription...",
                 lines=15,
                 max_lines=25,
                 interactive=False,
@@ -327,9 +404,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Live Transcription") as demo:
 
     clear_btn.click(fn=clear_transcription, outputs=[status_box, full_text, live_text])
 
-    # Update live transcription every 0.5 seconds using timer
-    timer = gr.Timer(0.5)
-    timer.tick(fn=lambda: current_text, outputs=live_text)
+    # Update live preview every 0.5 seconds
+    live_timer = gr.Timer(0.5)
+    live_timer.tick(fn=lambda: current_text, outputs=live_text)
 
     save_btn.click(fn=save_transcription, inputs=[full_text], outputs=[download_file])
 
@@ -350,13 +427,25 @@ def cleanup():
     # Give threads a moment to see the flag
     time.sleep(0.5)
 
+    # Clear the queue to help threads exit
+    try:
+        while not audio_queue.empty():
+            audio_queue.get_nowait()
+    except:
+        pass
+
     # Wait for threads to finish
     if record_thread and record_thread.is_alive():
         print("⏳ Waiting for record thread...")
         record_thread.join(timeout=3)
+        if record_thread.is_alive():
+            print("⚠️ Record thread still alive, forcing exit...")
+
     if process_thread and process_thread.is_alive():
         print("⏳ Waiting for process thread...")
         process_thread.join(timeout=3)
+        if process_thread.is_alive():
+            print("⚠️ Process thread still alive, forcing exit...")
 
     # Clear audio buffer
     complete_audio_buffer = []
@@ -374,9 +463,10 @@ def cleanup():
 
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully."""
-    print("\n⚠️ Interrupt received...")
+    print("\n⚠️ Interrupt received (Ctrl+C)...")
     cleanup()
-    sys.exit(0)
+    print("👋 Exiting...")
+    os._exit(0)  # Force exit if cleanup doesn't work
 
 
 # Register signal handlers
@@ -404,9 +494,12 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         print("\n⚠️ KeyboardInterrupt detected")
-        cleanup()
     except Exception as e:
-        print(f"\n❌ Error: {e}")
-        cleanup()
+        print(f"\n❌ Error during launch: {e}")
+        import traceback
+
+        traceback.print_exc()
     finally:
         cleanup()
+        print("👋 Goodbye!")
+        os._exit(0)
