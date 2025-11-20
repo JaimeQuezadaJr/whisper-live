@@ -1,0 +1,6 @@
+openai-whisper
+sounddevice
+numpy
+torch
+gradio>=4.0.0
+
