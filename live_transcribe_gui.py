@@ -327,7 +327,18 @@ def save_transcription(text):
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"transcription_{timestamp}.txt"
-    filepath = os.path.join(os.getcwd(), filename)
+
+    # Use transcriptions directory if it exists, otherwise current directory
+    transcriptions_dir = os.path.join(os.getcwd(), "transcriptions")
+    if os.path.exists(transcriptions_dir):
+        filepath = os.path.join(transcriptions_dir, filename)
+    else:
+        # Try to create it, but fall back to current dir if it fails
+        try:
+            os.makedirs(transcriptions_dir, exist_ok=True)
+            filepath = os.path.join(transcriptions_dir, filename)
+        except:
+            filepath = os.path.join(os.getcwd(), filename)
 
     with open(filepath, "w") as f:
         f.write(text)
