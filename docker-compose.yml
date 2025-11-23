@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  whisper-live:
+    build: .
+    container_name: whisper-live-transcription
+    ports:
+      - "7860:7860"
+    volumes:
+      # Mount transcriptions directory to persist files
+      - ./transcriptions:/app/transcriptions
+      # Mount audio devices (Linux)
+      - /dev/snd:/dev/snd
+    devices:
+      # Access to audio devices
+      - /dev/snd:/dev/snd
+    environment:
+      - PULSE_SERVER=unix:/run/user/1000/pulse/native
+    network_mode: host  # Required for audio device access on Linux
+    restart: unless-stopped
+
